@@ -2,9 +2,9 @@ import os, sys, torch, numpy as np
 from pathlib import Path
 from plyfile import PlyData, PlyElement
 
-# src.clustering 모듈 import
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, str(Path(PROJECT_ROOT) / 'src'))
+# clustering 모듈 import
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
 
 import clustering as clustering_lib
 
