@@ -18,6 +18,7 @@ from typing import Tuple, Optional, Dict, Any
 
 # Add script directory to path
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent  # dataset directory
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR / 'lib' / 'sampling'))
 sys.path.insert(0, str(SCRIPT_DIR / 'lib' / 'rendering'))
