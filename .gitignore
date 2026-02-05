@@ -1,0 +1,17 @@
+# Ignore everything
+*
+
+# But track JSON files
+!*.json
+
+# But track Python files
+!*.py
+
+# Track .gitignore itself
+!.gitignore
+
+# Track directories needed for JSON files
+!*/
+
+# Ignore .git directory
+.git/
