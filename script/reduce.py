@@ -168,30 +168,40 @@ def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iter
     opacities_activated = torch.sigmoid(opacities).view(-1)
     weights = opacities_activated.contiguous()
 
-    # Hierarchical K-means (Euclidean only)
+    # Hierarchical K-means (using W2 clustering)
     import time
     final_k = branching_factor ** depth
 
-    print(f"⚙️ {total_points} → {final_k} 클러스터로 축소 중 (Euclidean K-means)...")
+    # Primitive covariance 계산
+    print(f"🔧 Computing primitive covariances...")
+    covs = scale_quat_to_cov(scales, quats).contiguous()
+
+    print(f"⚙️ {total_points} → {final_k} 클러스터로 축소 중 (K-means with covariances)...")
     print(f"🔄 Running BFS hierarchical K-means (K={branching_factor}, depth={depth}, max_iters={max_iters})...")
     start_time = time.time()
 
-    # Euclidean K-means 호출 (means만 사용)
-    cluster_result = clustering_lib.clustering_euclidean_bfs(
-        means,
+    # CUDA 커널 호출 (clustering_bfs)
+    primitive_labels, level_mu, level_cov, level_w = clustering_lib.clustering_bfs(
+        means, covs,
         weights=weights,
         K=branching_factor,
         depth=depth,
         max_iters=max_iters,
         tol=1e-4,
+        tileB=64,
+        seed=0,
+        reseed_empty=True
     )
 
     elapsed = time.time() - start_time
     print(f"✅ Clustering completed in {elapsed:.2f}s ({depth} levels)")
 
-    # 결과 추출
-    primitive_labels = cluster_result['primitive_labels']  # (N,) int32
-    level_mu = cluster_result['level_mu']  # list of (K^lvl, 3)
+    # primitive_labels is a list of tensors, one per level
+    # For processing, we use the finest level (last one)
+    if isinstance(primitive_labels, list):
+        primitive_labels_finest = primitive_labels[-1]  # Use finest level labels
+    else:
+        primitive_labels_finest = primitive_labels
 
     # RGB 준비
     features_dc = features[:, :3]
@@ -207,16 +217,21 @@ def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iter
         lvl_centers = level_mu[level_idx]  # (K^lvl, 3)
         lvl_k = lvl_centers.shape[0]
 
-        # Primitive → Level 매핑 계산 (implicit tree 구조)
-        if level_idx == depth - 1:
-            lvl_labels_long = primitive_labels.long()
+        # Primitive → Level 매핑 계산 (use labels from this level if available)
+        if isinstance(primitive_labels, list) and level_idx < len(primitive_labels):
+            # Use the labels for this specific level
+            lvl_labels_long = primitive_labels[level_idx].long()
+        elif level_idx == depth - 1:
+            # Use finest level labels directly
+            lvl_labels_long = primitive_labels_finest.long()
         else:
+            # Compute labels from finest level by dividing
             divisor = branching_factor ** (depth - 1 - level_idx)
-            lvl_labels_long = (primitive_labels // divisor).long()
+            lvl_labels_long = (primitive_labels_finest // divisor).long()
 
         # Covariance 및 Scale/Quaternion 계산
-        lvl_cov = compute_cluster_covariance(means, lvl_labels_long, lvl_centers, weights, scales, quats, min_variance)
-        # CUDA 커널로 변환
+        # clustering_bfs already computed covariances
+        lvl_cov = level_cov[level_idx]  # (K^lvl, 3, 3)
         lvl_scales, lvl_quats = clustering_lib.cov_to_scale_quat(lvl_cov)
 
         # RGB 계산 (가중 평균)
@@ -247,7 +262,7 @@ def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iter
 
     # NPZ 저장
     out_path_npz = out_dir / f"{filename_base}.npz"
-    save_tensors_to_npz(out_path_npz, hierarchy_processed, branching_factor, depth, primitive_labels.int())
+    save_tensors_to_npz(out_path_npz, hierarchy_processed, branching_factor, depth, primitive_labels_finest.int())
     print(f"📁 Output: {out_path_npz}")
 
 if __name__ == "__main__":
