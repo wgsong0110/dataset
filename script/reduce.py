@@ -136,7 +136,7 @@ def save_tensors_to_npz(out_path: Path, hierarchy, K: int, depth: int, primitive
     print(f"✅ Saved {depth} levels (K={K}, format=4.0) to {out_path}")
 
 # 메인 함수
-def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iters: int = 20, min_variance: float = 1e-6, tileB: int = 64, seed: int = 0, distance_metric: str = 'euclidean'):
+def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iters: int = 20, min_variance: float = 1e-6):
     # Scene 파싱
     parts = scene.split('/')
     if len(parts) == 2:
@@ -168,67 +168,30 @@ def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iter
     opacities_activated = torch.sigmoid(opacities).view(-1)
     weights = opacities_activated.contiguous()
 
-    # Hierarchical K-means
+    # Hierarchical K-means (Euclidean only)
     import time
     final_k = branching_factor ** depth
 
-    if distance_metric == 'euclidean':
-        print(f"⚙️ {total_points} → {final_k} 클러스터로 축소 중 (Euclidean K-means, means-based)...")
-        print(f"🔄 Running BFS hierarchical K-means (K={branching_factor}, depth={depth}, max_iters={max_iters})...")
-        start_time = time.time()
+    print(f"⚙️ {total_points} → {final_k} 클러스터로 축소 중 (Euclidean K-means)...")
+    print(f"🔄 Running BFS hierarchical K-means (K={branching_factor}, depth={depth}, max_iters={max_iters})...")
+    start_time = time.time()
 
-        # Euclidean K-means 호출 (means만 사용)
-        cluster_result = clustering_lib.clustering_euclidean_bfs(
-            means,
-            weights=weights,
-            K=branching_factor,
-            depth=depth,
-            max_iters=max_iters,
-            tol=1e-4,
-        )
+    # Euclidean K-means 호출 (means만 사용)
+    cluster_result = clustering_lib.clustering_euclidean_bfs(
+        means,
+        weights=weights,
+        K=branching_factor,
+        depth=depth,
+        max_iters=max_iters,
+        tol=1e-4,
+    )
 
-        elapsed = time.time() - start_time
-        print(f"✅ Clustering completed in {elapsed:.2f}s ({depth} levels)")
+    elapsed = time.time() - start_time
+    print(f"✅ Clustering completed in {elapsed:.2f}s ({depth} levels)")
 
-        # 결과 추출
-        primitive_labels = cluster_result['primitive_labels']  # (N,) int32
-        level_mu = cluster_result['level_mu']  # list of (K^lvl, 3)
-        level_cov = None  # Euclidean 모드에서는 수동 계산 필요
-        level_w = None
-
-    elif distance_metric == 'w2':
-        # Primitive covariance 계산
-        print(f"🔧 Computing primitive covariances...")
-        covs = scale_quat_to_cov(scales, quats).contiguous()
-
-        print(f"⚙️ {total_points} → {final_k} 클러스터로 축소 중 (W2 K-means, CUDA accelerated)...")
-        print(f"🔄 Running BFS hierarchical K-means (K={branching_factor}, depth={depth}, max_iters={max_iters})...")
-        start_time = time.time()
-
-        # CUDA 커널 호출 (clustering_bfs)
-        cluster_result = clustering_lib.clustering_bfs(
-            means, covs,
-            weights=weights,
-            K=branching_factor,
-            depth=depth,
-            max_iters=max_iters,
-            tol=1e-4,
-            tileB=tileB,
-            seed=seed,
-            reseed_empty=True
-        )
-
-        elapsed = time.time() - start_time
-        print(f"✅ Clustering completed in {elapsed:.2f}s ({depth} levels)")
-
-        # 결과 추출
-        primitive_labels = cluster_result['primitive_labels']  # (N,) int32
-        level_mu = cluster_result['level_mu']  # list of (K^lvl, 3)
-        level_cov = cluster_result['level_cov']  # list of (K^lvl, 3, 3)
-        level_w = cluster_result['level_w']  # list of (K^lvl,)
-
-    else:
-        raise ValueError(f"Invalid distance_metric: {distance_metric}. Must be 'euclidean' or 'w2'.")
+    # 결과 추출
+    primitive_labels = cluster_result['primitive_labels']  # (N,) int32
+    level_mu = cluster_result['level_mu']  # list of (K^lvl, 3)
 
     # RGB 준비
     features_dc = features[:, :3]
@@ -252,15 +215,9 @@ def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iter
             lvl_labels_long = (primitive_labels // divisor).long()
 
         # Covariance 및 Scale/Quaternion 계산
-        if distance_metric == 'euclidean':
-            # Euclidean 모드: 수동으로 covariance 계산
-            lvl_cov = compute_cluster_covariance(means, lvl_labels_long, lvl_centers, weights, scales, quats, min_variance)
-            # CUDA 커널로 변환
-            lvl_scales, lvl_quats = clustering_lib.cov_to_scale_quat(lvl_cov)
-        else:  # w2
-            # W2 모드: 이미 계산된 covariance 사용
-            lvl_cov = level_cov[level_idx]  # (K^lvl, 3, 3)
-            lvl_scales, lvl_quats = clustering_lib.cov_to_scale_quat(lvl_cov)
+        lvl_cov = compute_cluster_covariance(means, lvl_labels_long, lvl_centers, weights, scales, quats, min_variance)
+        # CUDA 커널로 변환
+        lvl_scales, lvl_quats = clustering_lib.cov_to_scale_quat(lvl_cov)
 
         # RGB 계산 (가중 평균)
         lvl_rgb = torch.zeros(lvl_k, 3, device=features.device, dtype=features.dtype)
@@ -283,11 +240,10 @@ def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iter
 
     # 파일명 결정
     actual_k = hierarchy_processed[-1][0].shape[0]
-    metric_suffix = "euc" if distance_metric == 'euclidean' else "w2"
     if depth > 1:
-        filename_base = f"{actual_k}_h{branching_factor}x{depth}_{metric_suffix}"
+        filename_base = f"{actual_k}_h{branching_factor}x{depth}"
     else:
-        filename_base = f"{actual_k}_{metric_suffix}"
+        filename_base = f"{actual_k}"
 
     # NPZ 저장
     out_path_npz = out_dir / f"{filename_base}.npz"
@@ -297,16 +253,12 @@ def reduce_scene(scene: str, branching_factor: int = 8, depth: int = 1, max_iter
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Hierarchical K-means로 Gaussian Splatting PLY 축소 (Euclidean/W2 거리 지원)")
+    parser = argparse.ArgumentParser(description="Hierarchical K-means로 Gaussian Splatting PLY 축소 (Euclidean)")
     parser.add_argument("--scene", type=str, required=True, help="Scene: 'dataset/scene' (예: 'tank-temp/truck')")
     parser.add_argument("--branching_factor", type=int, default=8, help="각 레벨에서 분할할 클러스터 수")
     parser.add_argument("--depth", type=int, default=1, help="분할 깊이 (최종 클러스터 수 = branching_factor^depth)")
     parser.add_argument("--max_iters", type=int, default=20, help="K-means 최대 반복 횟수")
     parser.add_argument("--min_variance", type=float, default=1e-6, help="최소 분산 (공분산 정규화)")
-    parser.add_argument("--distance_metric", type=str, default='euclidean', choices=['euclidean', 'w2'],
-                        help="거리 메트릭: 'euclidean' (means 기반, 기본값) 또는 'w2' (Wasserstein-2, CUDA)")
-    parser.add_argument("--tileB", type=int, default=64, help="CUDA tile size for shared memory (W2 모드만)")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for FPS initialization (W2 모드만)")
     args = parser.parse_args()
 
     reduce_scene(
@@ -314,8 +266,5 @@ if __name__ == "__main__":
         branching_factor=args.branching_factor,
         depth=args.depth,
         max_iters=args.max_iters,
-        min_variance=args.min_variance,
-        tileB=args.tileB,
-        seed=args.seed,
-        distance_metric=args.distance_metric
+        min_variance=args.min_variance
     )
