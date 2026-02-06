@@ -178,6 +178,7 @@ def render_mahal_masks(
     device: torch.device,
     chunk_size: int = 4000,
     convention: str = "legacy_render_npz",
+    transpose: bool = False,
 ) -> list:
     """Render binary masks for multiple Mahalanobis thresholds.
 
@@ -190,6 +191,7 @@ def render_mahal_masks(
         device: Torch device.
         chunk_size: Ray chunk size for memory management.
         convention: 'legacy_render_npz' (opencv) or 'opengl'.
+        transpose: If True, transpose c2w의 3x3 rotation block before ray generation.
 
     Returns:
         List of (H, W) uint8 numpy arrays (0 or 255).
@@ -198,13 +200,15 @@ def render_mahal_masks(
     fx, fy, cx, cy = compute_camera_intrinsics(cam, w, h)
 
     # Generate rays
+    # cam.c2w는 CameraPool이 이미 c2w[:3, 1:3] *= -1 (Blender→OpenCV) 적용한 상태.
+    # convention에 관계없이 이 c2w를 그대로 사용하고,
+    # generate_rays_full_image의 convention 인자로 레이 방향만 제어.
     c2w = cam.c2w.to(device)
 
-    if convention == "opengl":
-        # CameraPool already applied c2w[:3, 1:3] *= -1 (Blender→OpenCV).
-        # Undo that to recover the original OpenGL/Blender c2w.
+    if transpose:
+        # rotation(3x3)만 transpose, translation은 그대로
         c2w = c2w.clone()
-        c2w[:3, 1:3] *= -1
+        c2w[:3, :3] = c2w[:3, :3].T
 
     rays_o, rays_d = generate_rays_full_image(
         c2w, fx, fy, cx, cy, w, h, device, convention=convention
@@ -341,6 +345,10 @@ def main():
         choices=["legacy_render_npz", "opengl"],
         help="Camera convention: legacy_render_npz (opencv) or opengl",
     )
+    parser.add_argument(
+        "--transpose", action="store_true",
+        help="Use transposed c2w matrix (c2w.T) for ray generation",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -378,7 +386,8 @@ def main():
 
     # Output directory
     conv_suffix = "_opengl" if args.convention == "opengl" else ""
-    scene_tag = f"{dataset}_{scene}{conv_suffix}"
+    trans_suffix = "_transposed" if args.transpose else ""
+    scene_tag = f"{dataset}_{scene}{conv_suffix}{trans_suffix}"
     out_dir = os.path.join(project_root, "rst", "mahal_mask", scene_tag)
     os.makedirs(out_dir, exist_ok=True)
     print(f"Output: {out_dir}")
@@ -390,7 +399,7 @@ def main():
         masks = render_mahal_masks(
             cam, means, cov_invs, thresholds,
             args.width, args.height, device, args.chunk_size,
-            convention=args.convention,
+            convention=args.convention, transpose=args.transpose,
         )
         save_masks_as_gif(masks, thresholds, out_dir, idx)
 
