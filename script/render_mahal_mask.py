@@ -177,6 +177,7 @@ def render_mahal_masks(
     h: int,
     device: torch.device,
     chunk_size: int = 4000,
+    convention: str = "legacy_render_npz",
 ) -> list:
     """Render binary masks for multiple Mahalanobis thresholds.
 
@@ -188,6 +189,7 @@ def render_mahal_masks(
         w, h: Output image dimensions.
         device: Torch device.
         chunk_size: Ray chunk size for memory management.
+        convention: 'legacy_render_npz' (opencv) or 'opengl'.
 
     Returns:
         List of (H, W) uint8 numpy arrays (0 or 255).
@@ -197,7 +199,16 @@ def render_mahal_masks(
 
     # Generate rays
     c2w = cam.c2w.to(device)
-    rays_o, rays_d = generate_rays_full_image(c2w, fx, fy, cx, cy, w, h, device)
+
+    if convention == "opengl":
+        # CameraPool already applied c2w[:3, 1:3] *= -1 (Blender→OpenCV).
+        # Undo that to recover the original OpenGL/Blender c2w.
+        c2w = c2w.clone()
+        c2w[:3, 1:3] *= -1
+
+    rays_o, rays_d = generate_rays_full_image(
+        c2w, fx, fy, cx, cy, w, h, device, convention=convention
+    )
 
     # Flatten
     rays_o_flat = rays_o.reshape(-1, 3)
@@ -325,6 +336,11 @@ def main():
         "--device", type=str, default="cuda",
         help="Torch device",
     )
+    parser.add_argument(
+        "--convention", type=str, default="legacy_render_npz",
+        choices=["legacy_render_npz", "opengl"],
+        help="Camera convention: legacy_render_npz (opencv) or opengl",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -361,7 +377,8 @@ def main():
     thresholds = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
 
     # Output directory
-    scene_tag = f"{dataset}_{scene}"
+    conv_suffix = "_opengl" if args.convention == "opengl" else ""
+    scene_tag = f"{dataset}_{scene}{conv_suffix}"
     out_dir = os.path.join(project_root, "rst", "mahal_mask", scene_tag)
     os.makedirs(out_dir, exist_ok=True)
     print(f"Output: {out_dir}")
@@ -373,6 +390,7 @@ def main():
         masks = render_mahal_masks(
             cam, means, cov_invs, thresholds,
             args.width, args.height, device, args.chunk_size,
+            convention=args.convention,
         )
         save_masks_as_gif(masks, thresholds, out_dir, idx)
 
