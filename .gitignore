@@ -15,3 +15,7 @@
 
 # Ignore .git directory
 .git/
+
+# Explicitly ignore .so and .npz files
+*.so
+*.npz
