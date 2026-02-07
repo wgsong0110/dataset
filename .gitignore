@@ -4,8 +4,9 @@
 # But track JSON files
 !*.json
 
-# But track Python files
+# But track Python and shell scripts
 !*.py
+!*.sh
 
 # Track .gitignore itself
 !.gitignore
